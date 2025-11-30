@@ -1,0 +1,7 @@
+@import "@unocss/reset/tailwind-v4.css";
+:root {
+  color-scheme: dark;
+}
+@function --translucent(--color, --opacity) {
+  result: oklch(from var(--color) l c h / var(--opacity));
+}

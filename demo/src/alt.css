@@ -1,0 +1,4 @@
+:root {
+  --c: oklch(0.6703 0.2047 241.41);
+  background-color: --translucent(var(--c), 0.2);
+}

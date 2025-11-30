@@ -1,0 +1,4 @@
+:root {
+  --c: #ff0000;
+  background-color: --translucent(var(--c), 0.5);
+}
