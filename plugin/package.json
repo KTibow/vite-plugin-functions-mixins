@@ -1,7 +1,7 @@
 {
   "name": "vite-plugin-functions-mixins",
-  "version": "0.0.1",
-  "description": "Use @function today",
+  "version": "0.0.2",
+  "description": "Use @function and @mixin today",
   "type": "module",
   "license": "MIT",
   "homepage": "https://github.com/KTibow/vite-plugin-functions-mixins#readme",

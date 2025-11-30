@@ -5,3 +5,9 @@
 @function --translucent(--color, --opacity) {
   result: oklch(from var(--color) l c h / var(--opacity));
 }
+
+@mixin --big-header(--size: 3rem, --weight: 700, --color: currentColor) {
+  font-size: env(--size);
+  font-weight: env(--weight);
+  color: env(--color);
+}

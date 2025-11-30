@@ -15,6 +15,13 @@ interface FunctionDef {
   body: string;
 }
 
+interface MixinDef {
+  name: string;
+  params: FunctionParam[];
+  body: string;
+  hasContents: boolean;
+}
+
 interface PluginOptions {
   /** Extra paths to scan for @function definitions (can be files or directories) */
   include?: string[];
@@ -70,15 +77,34 @@ function splitByComma(str: string): string[] {
   return parts;
 }
 
-function parseParams(paramStr: string): FunctionParam[] {
-  return splitByComma(paramStr).map((p) => {
+function parseParams(paramStr: string): {
+  params: FunctionParam[];
+  hasContents: boolean;
+} {
+  const parts = splitByComma(paramStr);
+  const params: FunctionParam[] = [];
+  let hasContents = false;
+
+  for (const p of parts) {
+    // Check for @contents parameter (for mixins)
+    if (p.trim() == "@contents") {
+      hasContents = true;
+      continue;
+    }
+
     const colonIdx = p.indexOf(":");
     const namePart = colonIdx > -1 ? p.slice(0, colonIdx).trim() : p;
     const defaultValue =
       colonIdx > -1 ? p.slice(colonIdx + 1).trim() : undefined;
-    const name = namePart.match(/^(--[\w-]+)/)?.[1] ?? namePart;
-    return { name, defaultValue };
-  });
+    // Remove type annotations like <color>, type(<number> | <percentage>), etc.
+    const nameMatch = namePart.match(/^(--[\w-]+)/);
+    const name = nameMatch?.[1] ?? namePart;
+    if (name) {
+      params.push({ name, defaultValue });
+    }
+  }
+
+  return { params, hasContents };
 }
 
 function extractResult(body: string): string {
@@ -103,6 +129,22 @@ function substituteVars(
   );
 }
 
+function substituteEnvVars(
+  template: string,
+  params: FunctionParam[],
+  args: string[],
+): string {
+  const argMap = new Map(
+    params.map((param, i) => [param.name, args[i] ?? param.defaultValue]),
+  );
+
+  return template.replace(
+    /env\(\s*(--[\w-]+)\s*(?:,\s*([^)]+))?\s*\)/g,
+    (match, varName, fallback) =>
+      argMap.get(varName) ?? fallback?.trim() ?? match,
+  );
+}
+
 // --- Function Extraction ---
 
 function extractFunctions(
@@ -118,9 +160,10 @@ function extractFunctions(
     const bodyStart = match.index! + fullMatch.length;
     const bodyEnd = findMatchingBrace(code, bodyStart);
 
+    const { params } = parseParams(paramStr);
     registry.set(name, {
       name,
-      params: parseParams(paramStr),
+      params,
       body: code.slice(bodyStart, bodyEnd),
     });
     removals.push([match.index!, bodyEnd + 1]);
@@ -129,10 +172,34 @@ function extractFunctions(
   return removals;
 }
 
-function stripFunctionDefinitions(
+// --- Mixin Extraction ---
+
+function extractMixins(
   code: string,
-  removals: [number, number][],
-): string {
+  registry: Map<string, MixinDef>,
+): [number, number][] {
+  const regex = /@mixin\s+(--[\w-]+)\s*\(([^)]*)\)\s*\{/g;
+  const removals: [number, number][] = [];
+
+  for (const match of code.matchAll(regex)) {
+    const [fullMatch, name, paramStr] = match;
+    const bodyStart = match.index! + fullMatch.length;
+    const bodyEnd = findMatchingBrace(code, bodyStart);
+
+    const { params, hasContents } = parseParams(paramStr);
+    registry.set(name, {
+      name,
+      params,
+      body: code.slice(bodyStart, bodyEnd),
+      hasContents,
+    });
+    removals.push([match.index!, bodyEnd + 1]);
+  }
+
+  return removals;
+}
+
+function stripDefinitions(code: string, removals: [number, number][]): string {
   let result = code;
   for (const [start, end] of removals.toReversed()) {
     const blank = result.slice(start, end).replace(/[^\n]/g, "");
@@ -184,6 +251,67 @@ function resolveOnce(code: string, registry: Map<string, FunctionDef>): string {
   return result + code.slice(lastIdx);
 }
 
+// --- Mixin Application Resolution ---
+
+function resolveMixinApplications(
+  code: string,
+  registry: Map<string, MixinDef>,
+): string {
+  let result = code;
+  for (let i = 0; i < MAX_RECURSION_DEPTH; i++) {
+    const next = resolveMixinsOnce(result, registry);
+    if (next == result) break;
+    result = next;
+  }
+  return result;
+}
+
+function resolveMixinsOnce(
+  code: string,
+  registry: Map<string, MixinDef>,
+): string {
+  // Match @apply with optional block: @apply --name(args) { contents } or @apply --name(args); or @apply --name;
+  const applyRegex =
+    /@apply\s+(--[\w-]+)(?:\s*\(([^)]*)\))?\s*(?:\{([^}]*)\}\s*;?|;)/g;
+  let result = "";
+  let lastIdx = 0;
+
+  for (const match of code.matchAll(applyRegex)) {
+    const [fullMatch, mixinName, argsStr, contentsBlock] = match;
+    const start = match.index!;
+
+    result += code.slice(lastIdx, start);
+
+    const def = registry.get(mixinName);
+    if (!def) {
+      // Unknown mixin, leave as-is or remove
+      result += `/* Unknown mixin: ${mixinName} */`;
+      lastIdx = start + fullMatch.length;
+      continue;
+    }
+
+    const args = argsStr ? splitByComma(argsStr) : [];
+    let substituted = substituteEnvVars(def.body, def.params, args);
+
+    // Handle @contents substitution
+    if (def.hasContents && contentsBlock !== undefined) {
+      substituted = substituted.replace(
+        /@contents\s*(?:\{[^}]*\})?\s*;?/g,
+        contentsBlock.trim(),
+      );
+    } else if (def.hasContents) {
+      // No contents block provided, use default if present
+      substituted = substituted.replace(/@contents\s*\{([^}]*)\}\s*;?/g, "$1");
+      substituted = substituted.replace(/@contents\s*;?/g, "");
+    }
+
+    result += substituted;
+    lastIdx = start + fullMatch.length;
+  }
+
+  return result + code.slice(lastIdx);
+}
+
 // --- File Discovery ---
 
 async function* findStyleFiles(
@@ -193,7 +321,7 @@ async function* findStyleFiles(
   const entries = await fs.readdir(dir, { withFileTypes: true });
   for (const entry of entries) {
     if (IGNORED_DIRS.has(entry.name)) continue;
-    if (skipNodeModules && entry.name === "node_modules") continue;
+    if (skipNodeModules && entry.name == "node_modules") continue;
 
     const fullPath = path.join(dir, entry.name);
     if (entry.isDirectory()) {
@@ -207,7 +335,8 @@ async function* findStyleFiles(
 // --- Plugin ---
 
 export const functionsMixins = (options: PluginOptions = {}): Plugin => {
-  const registry = new Map<string, FunctionDef>();
+  const functionRegistry = new Map<string, FunctionDef>();
+  const mixinRegistry = new Map<string, MixinDef>();
   let root: string;
 
   return {
@@ -225,16 +354,22 @@ export const functionsMixins = (options: PluginOptions = {}): Plugin => {
 
         if (stat.isDirectory()) {
           for await (const file of findStyleFiles(resolved)) {
-            extractFunctions(await fs.readFile(file, "utf-8"), registry);
+            const content = await fs.readFile(file, "utf-8");
+            extractFunctions(content, functionRegistry);
+            extractMixins(content, mixinRegistry);
           }
         } else {
-          extractFunctions(await fs.readFile(resolved, "utf-8"), registry);
+          const content = await fs.readFile(resolved, "utf-8");
+          extractFunctions(content, functionRegistry);
+          extractMixins(content, mixinRegistry);
         }
       });
       await Promise.all(includeScans);
 
       for await (const file of findStyleFiles(root)) {
-        extractFunctions(await fs.readFile(file, "utf-8"), registry);
+        const content = await fs.readFile(file, "utf-8");
+        extractFunctions(content, functionRegistry);
+        extractMixins(content, mixinRegistry);
       }
     },
 
@@ -244,11 +379,21 @@ export const functionsMixins = (options: PluginOptions = {}): Plugin => {
         return null;
       }
 
-      const removals = extractFunctions(code, registry);
-      const stripped = stripFunctionDefinitions(code, removals);
-      const resolved = resolveFunctionCalls(stripped, registry);
+      // Extract and strip function definitions
+      const functionRemovals = extractFunctions(code, functionRegistry);
+      let processed = stripDefinitions(code, functionRemovals);
 
-      return { code: resolved, map: null };
+      // Extract and strip mixin definitions
+      const mixinRemovals = extractMixins(processed, mixinRegistry);
+      processed = stripDefinitions(processed, mixinRemovals);
+
+      // Resolve @apply for mixins first
+      processed = resolveMixinApplications(processed, mixinRegistry);
+
+      // Then resolve function calls
+      processed = resolveFunctionCalls(processed, functionRegistry);
+
+      return { code: processed, map: null };
     },
   };
 };

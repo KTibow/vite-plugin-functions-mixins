@@ -2,3 +2,11 @@
   --c: #ff0000;
   background-color: --translucent(var(--c), 0.5);
 }
+
+h1 {
+  @apply --big-header(4rem, 800, #3498db);
+}
+
+h2 {
+  @apply --big-header();
+}
