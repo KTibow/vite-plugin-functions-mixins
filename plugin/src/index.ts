@@ -195,15 +195,6 @@ function extractMixins(
   return removals;
 }
 
-function stripDefinitions(code: string, removals: [number, number][]): string {
-  let result = code;
-  for (const [start, end] of removals.toReversed()) {
-    const blank = result.slice(start, end).replace(/[^\n]/g, "");
-    result = result.slice(0, start) + blank + result.slice(end);
-  }
-  return result;
-}
-
 // --- Function Call Resolution ---
 
 function resolveFunctionCalls(
@@ -333,6 +324,7 @@ function transformExcludingRanges(
   exclude: [number, number][],
   mixinRegistry: Map<string, MixinDef>,
   functionRegistry: Map<string, FunctionDef>,
+  strip: boolean,
 ): string {
   const ranges = mergeRanges(exclude);
   let result = "";
@@ -345,8 +337,17 @@ function transformExcludingRanges(
     processedChunk = resolveFunctionCalls(processedChunk, functionRegistry);
     result += processedChunk;
 
-    // Append the excluded range (definitions) untouched
-    result += code.slice(start, end);
+    // Handle the excluded range (the definition)
+    if (strip) {
+      // Replace definition with blanks that preserve newline characters to keep line numbers
+      const definition = code.slice(start, end);
+      const blank = definition.replace(/[^\n]/g, "");
+      result += blank;
+    } else {
+      // Append the definition UNTOUCHED
+      result += code.slice(start, end);
+    }
+
     cursor = end;
   }
 
@@ -407,16 +408,13 @@ export const functionsMixins = ({
       ...mixinRanges,
     ];
 
-    let processed = transformExcludingRanges(
+    const processed = transformExcludingRanges(
       code,
       excludeRanges,
       mixinRegistry,
       functionRegistry,
+      strip,
     );
-
-    if (strip) {
-      processed = stripDefinitions(processed, excludeRanges);
-    }
 
     return processed;
   }
