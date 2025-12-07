@@ -22,11 +22,6 @@ interface MixinDef {
   hasContents: boolean;
 }
 
-interface PluginOptions {
-  /** Extra paths to scan for @function definitions (can be files or directories) */
-  include?: string[];
-}
-
 // --- Constants ---
 
 const SOURCE_EXTENSIONS = new Set([
@@ -393,109 +388,63 @@ export interface ProcessOptions {
   strip?: boolean;
 }
 
-export async function processBuildFolder({
-  dir = "dist",
-  strip = false,
-}: ProcessOptions = {}): Promise<void> {
+// --- Plugin ---
+
+export const functionsMixins = ({
+  deps = [],
+}: {
+  deps?: string[];
+} = {}): Plugin => {
   const functionRegistry = new Map<string, FunctionDef>();
   const mixinRegistry = new Map<string, MixinDef>();
+  let root: string;
 
-  // First pass: collect all definitions
-  const filesToProcess: string[] = [];
-  for await (const file of findStyleFilesWithExtensions(
-    dir,
-    ALL_EXTENSIONS,
-    false,
-  )) {
-    filesToProcess.push(file);
-    const content = await fs.readFile(file, "utf-8");
-    extractFunctions(content, functionRegistry);
-    extractMixins(content, mixinRegistry);
-  }
-
-  // Second pass: process each file
-  for (const file of filesToProcess) {
-    const content = await fs.readFile(file, "utf-8");
-
-    // Extract ranges to remove definitions
-    const functionRanges = extractFunctions(content, functionRegistry);
-    const mixinRanges = extractMixins(content, mixinRegistry);
+  function processCode(code: string, strip: boolean): string {
+    const functionRanges = extractFunctions(code, functionRegistry);
+    const mixinRanges = extractMixins(code, mixinRegistry);
     const excludeRanges: [number, number][] = [
       ...functionRanges,
       ...mixinRanges,
     ];
 
-    // Resolve calls outside definitions
     let processed = transformExcludingRanges(
-      content,
+      code,
       excludeRanges,
       mixinRegistry,
       functionRegistry,
     );
 
     if (strip) {
-      // Remove the definitions since they're now resolved
-      processed = stripDefinitions(processed, [
-        ...functionRanges,
-        ...mixinRanges,
-      ]);
+      processed = stripDefinitions(processed, excludeRanges);
     }
 
-    await fs.writeFile(file, processed, "utf-8");
+    return processed;
   }
-}
 
-async function* findStyleFilesWithExtensions(
-  dir: string,
-  extensions: Set<string>,
-  skipNodeModules = true,
-): AsyncGenerator<string> {
-  const entries = await fs.readdir(dir, { withFileTypes: true });
-  for (const entry of entries) {
-    if (IGNORED_DIRS.has(entry.name)) continue;
-    if (skipNodeModules && entry.name == "node_modules") continue;
+  const stylePreprocessor = ({
+    content,
+    filename,
+  }: {
+    content: string;
+    filename: string;
+  }) => {
+    const dep = deps.find((d) => filename.includes(`node_modules/${d}/`));
+    if (!dep) return;
 
-    const fullPath = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      yield* findStyleFilesWithExtensions(
-        fullPath,
-        extensions,
-        skipNodeModules,
-      );
-    } else if (extensions.has(entry.name.split(".").at(-1)!)) {
-      yield fullPath;
-    }
-  }
-}
-
-// --- Plugin ---
-
-export const functionsMixins = (options: PluginOptions = {}): Plugin => {
-  const functionRegistry = new Map<string, FunctionDef>();
-  const mixinRegistry = new Map<string, MixinDef>();
-  let root: string;
+    const processed = processCode(content, true);
+    return { code: processed };
+  };
 
   return {
     name: "vite-plugin-functions-mixins",
-    enforce: "pre",
-
-    configResolved(config: ResolvedConfig) {
-      root = config.root;
-    },
 
     async buildStart() {
-      const includeScans = [...(options.include || []), root].map(async (p) => {
-        const resolved = path.isAbsolute(p) ? p : path.join(root, p);
-        const stat = await fs.stat(resolved);
-
-        if (stat.isDirectory()) {
-          for await (const file of findStyleFiles(resolved)) {
-            const content = await fs.readFile(file, "utf-8");
-            extractFunctions(content, functionRegistry);
-            extractMixins(content, mixinRegistry);
-          }
-        } else {
-          const content = await fs.readFile(resolved, "utf-8");
+      const includeScans = [
+        ...deps.map((d) => path.join("node_modules", d)),
+        root,
+      ].map(async (p) => {
+        for await (const file of findStyleFiles(p)) {
+          const content = await fs.readFile(file, "utf-8");
           extractFunctions(content, functionRegistry);
           extractMixins(content, mixinRegistry);
         }
@@ -503,32 +452,24 @@ export const functionsMixins = (options: PluginOptions = {}): Plugin => {
       await Promise.all(includeScans);
     },
 
-    generateBundle(_options, bundle) {
-      for (const [fileName, chunk] of Object.entries(bundle)) {
-        if (chunk.type != "asset" || !fileName.endsWith(".css")) {
-          continue;
-        }
+    configResolved(config: ResolvedConfig) {
+      root = config.root;
 
-        const code =
-          typeof chunk.source == "string"
-            ? chunk.source
-            : new TextDecoder().decode(chunk.source);
-
-        const functionRanges = extractFunctions(code, functionRegistry);
-        const mixinRanges = extractMixins(code, mixinRegistry);
-
-        const excludeRanges = [...functionRanges, ...mixinRanges];
-
-        let processed = transformExcludingRanges(
-          code,
-          excludeRanges,
-          mixinRegistry,
-          functionRegistry,
-        );
-        processed = stripDefinitions(processed, excludeRanges);
-
-        chunk.source = processed;
-      }
+      const sveltePlugin = config.plugins.find(
+        (p) => p.name == "vite-plugin-svelte:config",
+      );
+      if (!sveltePlugin?.api?.options) return;
+      const opts = sveltePlugin.api.options;
+      opts.preprocess = [
+        ...(Array.isArray(opts.preprocess)
+          ? opts.preprocess
+          : opts.preprocess
+            ? [opts.preprocess]
+            : []),
+        {
+          style: stylePreprocessor,
+        },
+      ];
     },
 
     transform(code: string, id: string) {
@@ -537,26 +478,7 @@ export const functionsMixins = (options: PluginOptions = {}): Plugin => {
         return null;
       }
 
-      // Extract function and mixin definitions to populate registries, but do not remove them
-      const functionRanges = extractFunctions(code, functionRegistry);
-      const mixinRanges = extractMixins(code, mixinRegistry);
-
-      const excludeRanges: [number, number][] = [
-        ...functionRanges,
-        ...mixinRanges,
-      ];
-
-      // Resolve @apply and function calls only outside definition blocks
-      let processed = transformExcludingRanges(
-        code,
-        excludeRanges,
-        mixinRegistry,
-        functionRegistry,
-      );
-
-      // In the plugin (bundling for browser), we ALWAYS strip definitions
-      processed = stripDefinitions(processed, excludeRanges);
-
+      const processed = processCode(code, true);
       return { code: processed, map: null };
     },
   };
