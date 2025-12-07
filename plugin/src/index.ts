@@ -178,14 +178,15 @@ function extractMixins(
   code: string,
   registry: Map<string, MixinDef>,
 ): [number, number][] {
-  const regex = /@mixin\s+(--[\w-]+)\s*\(([^)]*)\)\s*\{/g;
+  const regex = /@mixin\s+(--[\w-]+)\s*(\([^)]*\))?\s*\{/g;
   const removals: [number, number][] = [];
 
   for (const match of code.matchAll(regex)) {
-    const [fullMatch, name, paramStr] = match;
+    const [fullMatch, name, paramsWithParens] = match;
     const bodyStart = match.index! + fullMatch.length;
     const bodyEnd = findMatchingBrace(code, bodyStart);
 
+    const paramStr = paramsWithParens ? paramsWithParens.slice(1, -1) : "";
     const { params, hasContents } = parseParams(paramStr);
     registry.set(name, {
       name,
@@ -312,6 +313,57 @@ function resolveMixinsOnce(
   return result + code.slice(lastIdx);
 }
 
+// --- Helpers to preserve definitions while transforming outside them ---
+
+function mergeRanges(ranges: [number, number][]): [number, number][] {
+  if (ranges.length === 0) return [];
+  const sorted = [...ranges].sort((a, b) => a[0] - b[0]);
+  const merged: [number, number][] = [];
+  let [curStart, curEnd] = sorted[0];
+  for (let i = 1; i < sorted.length; i++) {
+    const [s, e] = sorted[i];
+    if (s <= curEnd) {
+      curEnd = Math.max(curEnd, e);
+    } else {
+      merged.push([curStart, curEnd]);
+      [curStart, curEnd] = [s, e];
+    }
+  }
+  merged.push([curStart, curEnd]);
+  return merged;
+}
+
+function transformExcludingRanges(
+  code: string,
+  exclude: [number, number][],
+  mixinRegistry: Map<string, MixinDef>,
+  functionRegistry: Map<string, FunctionDef>,
+): string {
+  const ranges = mergeRanges(exclude);
+  let result = "";
+  let cursor = 0;
+
+  for (const [start, end] of ranges) {
+    // Process the chunk before this excluded range
+    const chunk = code.slice(cursor, start);
+    let processedChunk = resolveMixinApplications(chunk, mixinRegistry);
+    processedChunk = resolveFunctionCalls(processedChunk, functionRegistry);
+    result += processedChunk;
+
+    // Append the excluded range (definitions) untouched
+    result += code.slice(start, end);
+    cursor = end;
+  }
+
+  // Process the trailing part after the last excluded range
+  const tail = code.slice(cursor);
+  let processedTail = resolveMixinApplications(tail, mixinRegistry);
+  processedTail = resolveFunctionCalls(processedTail, functionRegistry);
+  result += processedTail;
+
+  return result;
+}
+
 // --- File Discovery ---
 
 async function* findStyleFiles(
@@ -327,6 +379,90 @@ async function* findStyleFiles(
     if (entry.isDirectory()) {
       yield* findStyleFiles(fullPath, skipNodeModules);
     } else if (SOURCE_EXTENSIONS.has(entry.name.split(".").at(-1)!)) {
+      yield fullPath;
+    }
+  }
+}
+
+// --- Build Folder Processor ---
+
+export interface ProcessOptions {
+  /** Directory to process (defaults to 'dist') */
+  dir?: string;
+  /** Whether to remove @function and @mixin definitions after processing (default: false) */
+  strip?: boolean;
+}
+
+export async function processBuildFolder({
+  dir = "dist",
+  strip = false,
+}: ProcessOptions = {}): Promise<void> {
+  const functionRegistry = new Map<string, FunctionDef>();
+  const mixinRegistry = new Map<string, MixinDef>();
+
+  // First pass: collect all definitions
+  const filesToProcess: string[] = [];
+  for await (const file of findStyleFilesWithExtensions(
+    dir,
+    ALL_EXTENSIONS,
+    false,
+  )) {
+    filesToProcess.push(file);
+    const content = await fs.readFile(file, "utf-8");
+    extractFunctions(content, functionRegistry);
+    extractMixins(content, mixinRegistry);
+  }
+
+  // Second pass: process each file
+  for (const file of filesToProcess) {
+    const content = await fs.readFile(file, "utf-8");
+
+    // Extract ranges to remove definitions
+    const functionRanges = extractFunctions(content, functionRegistry);
+    const mixinRanges = extractMixins(content, mixinRegistry);
+    const excludeRanges: [number, number][] = [
+      ...functionRanges,
+      ...mixinRanges,
+    ];
+
+    // Resolve calls outside definitions
+    let processed = transformExcludingRanges(
+      content,
+      excludeRanges,
+      mixinRegistry,
+      functionRegistry,
+    );
+
+    if (strip) {
+      // Remove the definitions since they're now resolved
+      processed = stripDefinitions(processed, [
+        ...functionRanges,
+        ...mixinRanges,
+      ]);
+    }
+
+    await fs.writeFile(file, processed, "utf-8");
+  }
+}
+
+async function* findStyleFilesWithExtensions(
+  dir: string,
+  extensions: Set<string>,
+  skipNodeModules = true,
+): AsyncGenerator<string> {
+  const entries = await fs.readdir(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (IGNORED_DIRS.has(entry.name)) continue;
+    if (skipNodeModules && entry.name == "node_modules") continue;
+
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      yield* findStyleFilesWithExtensions(
+        fullPath,
+        extensions,
+        skipNodeModules,
+      );
+    } else if (extensions.has(entry.name.split(".").at(-1)!)) {
       yield fullPath;
     }
   }
@@ -379,19 +515,25 @@ export const functionsMixins = (options: PluginOptions = {}): Plugin => {
         return null;
       }
 
-      // Extract and strip function definitions
-      const functionRemovals = extractFunctions(code, functionRegistry);
-      let processed = stripDefinitions(code, functionRemovals);
+      // Extract function and mixin definitions to populate registries, but do not remove them
+      const functionRanges = extractFunctions(code, functionRegistry);
+      const mixinRanges = extractMixins(code, mixinRegistry);
 
-      // Extract and strip mixin definitions
-      const mixinRemovals = extractMixins(processed, mixinRegistry);
-      processed = stripDefinitions(processed, mixinRemovals);
+      const excludeRanges: [number, number][] = [
+        ...functionRanges,
+        ...mixinRanges,
+      ];
 
-      // Resolve @apply for mixins first
-      processed = resolveMixinApplications(processed, mixinRegistry);
+      // Resolve @apply and function calls only outside definition blocks
+      let processed = transformExcludingRanges(
+        code,
+        excludeRanges,
+        mixinRegistry,
+        functionRegistry,
+      );
 
-      // Then resolve function calls
-      processed = resolveFunctionCalls(processed, functionRegistry);
+      // In the plugin (bundling for browser), we ALWAYS strip definitions
+      processed = stripDefinitions(processed, excludeRanges);
 
       return { code: processed, map: null };
     },
