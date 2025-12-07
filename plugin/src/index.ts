@@ -484,7 +484,7 @@ export const functionsMixins = (options: PluginOptions = {}): Plugin => {
     },
 
     async buildStart() {
-      const includeScans = (options.include ?? []).map(async (p) => {
+      const includeScans = [...(options.include || []), root].map(async (p) => {
         const resolved = path.isAbsolute(p) ? p : path.join(root, p);
         const stat = await fs.stat(resolved);
 
@@ -501,11 +501,33 @@ export const functionsMixins = (options: PluginOptions = {}): Plugin => {
         }
       });
       await Promise.all(includeScans);
+    },
 
-      for await (const file of findStyleFiles(root)) {
-        const content = await fs.readFile(file, "utf-8");
-        extractFunctions(content, functionRegistry);
-        extractMixins(content, mixinRegistry);
+    generateBundle(_options, bundle) {
+      for (const [fileName, chunk] of Object.entries(bundle)) {
+        if (chunk.type != "asset" || !fileName.endsWith(".css")) {
+          continue;
+        }
+
+        const code =
+          typeof chunk.source == "string"
+            ? chunk.source
+            : new TextDecoder().decode(chunk.source);
+
+        const functionRanges = extractFunctions(code, functionRegistry);
+        const mixinRanges = extractMixins(code, mixinRegistry);
+
+        const excludeRanges = [...functionRanges, ...mixinRanges];
+
+        let processed = transformExcludingRanges(
+          code,
+          excludeRanges,
+          mixinRegistry,
+          functionRegistry,
+        );
+        processed = stripDefinitions(processed, excludeRanges);
+
+        chunk.source = processed;
       }
     },
 
