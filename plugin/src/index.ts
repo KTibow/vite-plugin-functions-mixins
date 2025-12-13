@@ -453,9 +453,9 @@ export const functionsMixins = ({
     configResolved(config: ResolvedConfig) {
       root = config.root;
 
-      const sveltePlugin = config.plugins.find(
-        (p) => p.name == "vite-plugin-svelte:config",
-      );
+      const sveltePlugin =
+        config.plugins.find((p) => p.name == "vite-plugin-svelte:config") ||
+        config.plugins.find((p) => p.name == "vite-plugin-svelte");
       if (!sveltePlugin?.api?.options) return;
       const opts = sveltePlugin.api.options;
       opts.preprocess = [
