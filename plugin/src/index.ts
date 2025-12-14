@@ -117,9 +117,10 @@ function substituteVars(
   );
 
   return template.replace(
-    /var\(\s*(--[\w-]+)\s*(?:,\s*([^)]+))?\s*\)/g,
-    (match, varName, fallback) =>
-      argMap.get(varName) ?? fallback?.trim() ?? match,
+    /var\(\s*(--[\w-]+)\s*(?:,\s*[^)]+)?\s*\)/g,
+    (match, varName) => {
+      return argMap.get(varName) ?? match;
+    },
   );
 }
 
