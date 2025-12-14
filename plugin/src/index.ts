@@ -32,7 +32,6 @@ const SOURCE_EXTENSIONS = new Set([
   "styl",
   "stylus",
 ]);
-const ALL_EXTENSIONS = new Set([...SOURCE_EXTENSIONS, "svelte", "vue"]);
 const IGNORED_DIRS = new Set([".git", "dist"]);
 const MAX_RECURSION_DEPTH = 10;
 
@@ -471,13 +470,21 @@ export const functionsMixins = ({
     },
 
     transform(code: string, id: string) {
-      const ext = id.split("?")[0].split(".").at(-1)!;
-      if (!ALL_EXTENSIONS.has(ext)) {
-        return null;
-      }
+      const ext =
+        id.split("?")[1]?.split("lang.")[1] ||
+        id.split("?")[0].split(".").at(-1)!;
 
-      const processed = processCode(code, true);
-      return { code: processed, map: null };
+      if (SOURCE_EXTENSIONS.has(ext)) {
+        const processed = processCode(code, true);
+        return { code: processed, map: null };
+      } else if (ext == "svelte" || ext == "vue") {
+        const styleStart = code.indexOf("<style");
+        if (styleStart == -1) return;
+
+        const before = code.slice(0, styleStart);
+        const after = code.slice(styleStart);
+        return { code: before + processCode(after, true), map: null };
+      }
     },
   };
 };
