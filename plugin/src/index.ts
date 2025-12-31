@@ -380,21 +380,14 @@ async function* findStyleFiles(
   }
 }
 
-// --- Build Folder Processor ---
-
-export interface ProcessOptions {
-  /** Directory to process (defaults to 'dist') */
-  dir?: string;
-  /** Whether to remove @function and @mixin definitions after processing (default: false) */
-  strip?: boolean;
-}
-
 // --- Plugin ---
 
 export const functionsMixins = ({
   deps = [],
+  strip = true,
 }: {
   deps?: string[];
+  strip?: boolean;
 } = {}): Plugin => {
   const functionRegistry = new Map<string, FunctionDef>();
   const mixinRegistry = new Map<string, MixinDef>();
@@ -429,7 +422,7 @@ export const functionsMixins = ({
     const dep = deps.find((d) => filename.includes(`node_modules/${d}/`));
     if (!dep) return;
 
-    const processed = processCode(content, true);
+    const processed = processCode(content, strip);
     return { code: processed };
   };
 
@@ -476,7 +469,7 @@ export const functionsMixins = ({
         id.split("?")[0].split(".").at(-1)!;
 
       if (SOURCE_EXTENSIONS.has(ext)) {
-        const processed = processCode(code, true);
+        const processed = processCode(code, strip);
         return { code: processed, map: null };
       } else if (ext == "svelte" || ext == "vue") {
         const styleStart = code.indexOf("<style");
@@ -484,7 +477,7 @@ export const functionsMixins = ({
 
         const before = code.slice(0, styleStart);
         const after = code.slice(styleStart);
-        return { code: before + processCode(after, true), map: null };
+        return { code: before + processCode(after, strip), map: null };
       }
     },
   };
