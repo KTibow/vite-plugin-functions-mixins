@@ -393,6 +393,9 @@ export const functionsMixins = ({
   const mixinRegistry = new Map<string, MixinDef>();
   let root: string;
 
+  const depPaths = deps.map((d) => join("node_modules", d));
+  const depPathsTerminated = deps.map((d) => join("node_modules", d, ""));
+
   function processCode(code: string, strip: boolean): string {
     const functionRanges = extractFunctions(code, functionRegistry);
     const mixinRanges = extractMixins(code, mixinRegistry);
@@ -419,7 +422,7 @@ export const functionsMixins = ({
     content: string;
     filename: string;
   }) => {
-    const dep = deps.find((d) => filename.includes(`node_modules/${d}/`));
+    const dep = depPathsTerminated.find((d) => filename.includes(d));
     if (!dep) return;
 
     const processed = processCode(content, strip);
@@ -430,10 +433,7 @@ export const functionsMixins = ({
     name: "vite-plugin-functions-mixins",
 
     async buildStart() {
-      const includeScans = [
-        ...deps.map((d) => join("node_modules", d)),
-        root,
-      ].map(async (p) => {
+      const includeScans = [...depPaths, root].map(async (p) => {
         for await (const file of findStyleFiles(p)) {
           const content = await readFile(file, "utf-8");
           extractFunctions(content, functionRegistry);
