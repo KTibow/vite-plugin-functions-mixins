@@ -224,6 +224,9 @@ function resolveOnce(code: string, registry: Map<string, FunctionDef>): string {
 
     const def = registry.get(fnName);
     if (!def) {
+      console.warn(
+        `Unknown function ${fnName}. Registry size is ${registry.size}.`,
+      );
       result += fullMatch;
       lastIdx = argsStart;
       continue;
