@@ -1,6 +1,6 @@
 import type { Plugin, ResolvedConfig } from "vite";
-import * as fs from "node:fs/promises";
-import * as path from "node:path";
+import { readdir, readFile } from "node:fs/promises";
+import { join } from "node:path";
 
 // --- Types ---
 
@@ -366,12 +366,12 @@ async function* findStyleFiles(
   dir: string,
   skipNodeModules = true,
 ): AsyncGenerator<string> {
-  const entries = await fs.readdir(dir, { withFileTypes: true });
+  const entries = await readdir(dir, { withFileTypes: true });
   for (const entry of entries) {
     if (IGNORED_DIRS.has(entry.name)) continue;
     if (skipNodeModules && entry.name == "node_modules") continue;
 
-    const fullPath = path.join(dir, entry.name);
+    const fullPath = join(dir, entry.name);
     if (entry.isDirectory()) {
       yield* findStyleFiles(fullPath, skipNodeModules);
     } else if (SOURCE_EXTENSIONS.has(entry.name.split(".").at(-1)!)) {
@@ -431,11 +431,11 @@ export const functionsMixins = ({
 
     async buildStart() {
       const includeScans = [
-        ...deps.map((d) => path.join("node_modules", d)),
+        ...deps.map((d) => join("node_modules", d)),
         root,
       ].map(async (p) => {
         for await (const file of findStyleFiles(p)) {
-          const content = await fs.readFile(file, "utf-8");
+          const content = await readFile(file, "utf-8");
           extractFunctions(content, functionRegistry);
           extractMixins(content, mixinRegistry);
         }
